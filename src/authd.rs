@@ -9,6 +9,23 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 // How long before lack of client response causes a timeout
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(10);
 
+fn create_web_service(state: AuthenticatorState) -> App<AuthenticatorState> {
+    App::with_state(state)
+        .resource("/", |r| {
+            r.method(Method::GET).f(|_| HttpResponse::Ok());
+        })
+        .resource("/create/{locator}/{password}/{invite}", |r| {
+            r.method(Method::POST).with(authd_create_acc);
+        })
+        .resource("/authorise/{auth_req}", |r| {
+            r.method(Method::POST).with(authd_authorise);
+        })
+        .resource("/ws", |r| {
+            r.method(Method::GET).with(authd_web_socket);
+        })
+        .default_resource(|r| r.f(|_| HttpResponse::NotFound().body("Service endpoint not found.")))
+}
+
 pub fn run(port_arg: u16, authenticator: Option<Authenticator>) {
     let handle: Arc<Mutex<Option<Result<Authenticator, AuthError>>>> = match authenticator {
         Some(auth) => Arc::new(Mutex::new(Some(Ok(auth)))),
@@ -20,20 +37,9 @@ pub fn run(port_arg: u16, authenticator: Option<Authenticator>) {
     println!("Exposing service on {}", &address);
 
     server::new(move || {
-        App::with_state(AuthenticatorState {
+        create_web_service(AuthenticatorState {
             handle: handle.clone(),
-            host_port: port.clone(),
         })
-        .resource("/", |r| {
-            r.method(Method::GET).f(|_| HttpResponse::Ok());
-        })
-        .resource("/authorise/{auth_req}", |r| {
-            r.method(Method::POST).with(authd_authorise);
-        })
-        .resource("/ws", |r| {
-            r.method(Method::GET).with(authd_web_socket);
-        })
-        .default_resource(|r| r.f(|_| HttpResponse::NotFound().body("Service endpoint not found.")))
         .finish()
     })
     .bind(&address)
@@ -43,7 +49,6 @@ pub fn run(port_arg: u16, authenticator: Option<Authenticator>) {
 
 struct AuthenticatorState {
     pub handle: Arc<Mutex<Option<Result<Authenticator, AuthError>>>>,
-    pub host_port: Arc<u16>,
 }
 
 struct WebSocket {
@@ -167,7 +172,8 @@ fn authd_web_socket(req: HttpRequest<AuthenticatorState>) -> Result<HttpResponse
 #[cfg(test)]
 mod tests {
     use super::{
-        authd_authorise, authd_create_acc, authd_login, authd_web_socket, AuthenticatorState,
+        authd_authorise, authd_create_acc, authd_login, authd_web_socket, create_web_service,
+        AuthenticatorState,
     };
     use actix::prelude::*;
     use actix_web::ws::{ClientWriter, Message as MessageEnum, ProtocolError};
@@ -243,10 +249,8 @@ mod tests {
     fn create_test_service() -> App<AuthenticatorState> {
         let handle: Arc<Mutex<Option<Result<Authenticator, AuthError>>>> =
             Arc::new(Mutex::new(None));
-        let host_port = Arc::new(0);
         App::with_state(AuthenticatorState {
             handle: handle.clone(),
-            host_port: host_port.clone(),
         })
         .resource("/", |r| {
             r.method(Method::GET).f(|_| HttpResponse::Ok());
@@ -275,12 +279,19 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn post_create_account() {
         let mut rng = rand::thread_rng();
         let locator: u32 = rng.gen();
         let password: u32 = rng.gen();
         let invite: u16 = rng.gen();
-        let mut srv = test::TestServer::with_factory(create_test_service);
+        let mut srv = test::TestServer::with_factory(|| {
+            let handle: Arc<Mutex<Option<Result<Authenticator, AuthError>>>> =
+                Arc::new(Mutex::new(None));
+            create_web_service(AuthenticatorState {
+                handle: handle.clone(),
+            })
+        });
         let endpoint = format!("/create/{}/{}/{}", locator, password, invite);
         let request = srv.client(Method::POST, &endpoint).finish().unwrap();
         match srv.execute(request.send()) {
